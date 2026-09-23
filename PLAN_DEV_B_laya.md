@@ -23,6 +23,27 @@ You own: `server.py`, `test_server.py`. Don't edit `pii_check.py` or `test_hook.
    ```
    **Known gotcha:** if `laya.load()` hangs, it's `transformers` deadlocking on a TensorFlow probe at import — `USE_TF=0` must be set *before* `import laya`, not after.
 
+   **Known gotcha (Windows): `OSError: [WinError 1314] A required privilege is not held by the client`.** Hugging Face's cache places files with symlinks, which Windows only allows with Developer Mode on or as admin. The failure is late and misleading: it happened on the demo machine after the ~800MB weights had already downloaded, when linking one small file (`tokenizer/tokenizer_config.json`) into place. Don't delete the cache and re-download.
+   - **Prevent it:** before the first `laya.load()`, turn on Developer Mode (Settings → System → For developers → Developer Mode).
+   - **Or repair it after the error:** the missing file is already in the cache's `blobs/` folder. It just wasn't linked. This copies every missing file into place from its blob (stdlib only, no re-download):
+     ```bash
+     python -c "
+     import json, os, shutil, glob
+     d = os.path.expanduser('~/.cache/huggingface/hub/models--convaiinnovations--laya')
+     for tree in glob.glob(d + '/trees/*.json'):
+         rev = os.path.basename(tree)[:-5]
+         for path, meta in json.load(open(tree))['files'].items():
+             dst = os.path.join(d, 'snapshots', rev, path)
+             src = os.path.join(d, 'blobs', meta['blob_id'])
+             if not os.path.exists(dst) and os.path.exists(src):
+                 os.makedirs(os.path.dirname(dst), exist_ok=True)
+                 shutil.copyfile(src, dst)
+                 print('repaired', path)
+     "
+     ```
+     Then re-run the smoke test above. On the demo machine it loaded and answered in ~7s.
+   - You'll also see a `checkpoint ships invalid temperatures ... choice:11+` warning on load. It only affects choice questions with 11+ options; ours has 5, so ignore it.
+
 3. While that runs, write `server.py` below.
 
 ## Phase 3 (numbering matches the original plan) — build `server.py`
