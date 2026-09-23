@@ -23,5 +23,23 @@ for label, pattern in PATTERNS.items():
     if re.search(pattern, prompt):
         block(f"Blocked: possible {label} detected (HIPAA Safe Harbor identifier).")
 
-# <-- after the team checkpoint, the Laya client block goes here -->
+# Local Laya server (server.py) for categories regex can't catch: names, addresses, dates, free-form IDs.
+# Measured on the demo machine: ~0.5s for a short prompt, ~6.6s worst case (4 chunks, LAYA_THREADS=24).
+# Must stay under the 15s hook timeout in settings.json.
+LAYA_TIMEOUT = 10
+try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    req = urllib.request.Request(
+        "http://127.0.0.1:8420/check",
+        data=json.dumps({"text": prompt}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with opener.open(req, timeout=LAYA_TIMEOUT) as resp:
+        r = json.loads(resp.read())
+    if r.get("blocked"):
+        block(f"Blocked: Laya flagged a possible '{r['category']}' Safe Harbor identifier (p={r['phi_prob']:.2f}).")
+except Exception:
+    pass  # fail OPEN — a Laya/server hiccup must never block every prompt
+
 sys.exit(0)
