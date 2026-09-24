@@ -24,6 +24,9 @@ POSITIVES = [
     "the member's health plan ID is BCBS-77120394",
     "Mr. Okafor, age 92, lives at 118 Harbor View Rd, Portland ME 04101",
     "device serial SN-4471-XK99 was implanted last spring",
+    "her home address is 9 Rue Cler, Paris",
+    "the patient lives in Cedar Rapids",
+    "driver's license D1234567 belongs to the patient",
 ]
 # Ordinary coding prompts. Every one of these MUST come back blocked=false.
 NEGATIVES = [
@@ -37,6 +40,15 @@ NEGATIVES = [
     "rename the patient table to encounters in the migration",
     "explain the difference between a list and a tuple in Python",
     "the HIPAA Safe Harbor standard lists 18 identifier categories",
+    # number-heavy prompts: the first geographic/id_number wordings read these as ZIPs or record numbers
+    "run it on 127.0.0.1:8420",
+    "curl http://127.0.0.1:8420/health",
+    "the ticket number is 48213",
+    "fix PR #12345 before merging",
+    "the error is on line 48213 of main.py",
+    "set the port to 8080 in config",
+    "error code 40401 means not found",
+    "deploy build 20240917 to staging",
 ]
 
 
