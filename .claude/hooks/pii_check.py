@@ -157,7 +157,9 @@ def on_prompt():
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         req = urllib.request.Request(
             "http://127.0.0.1:8420/check",
-            data=json.dumps({"text": prompt}).encode(),
+            # Strip tokens first: they hold no PHI, but Laya scores them as ID numbers (p~0.96),
+            # which would re-block every pasted masked prompt.
+            data=json.dumps({"text": TOKEN_RE.sub("", prompt)}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )

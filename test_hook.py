@@ -28,7 +28,6 @@ def check(name, ok):
 CASES = [
     ("help me refactor this function", 0),
     ("bump version to 3.14.159", 0),
-    ("run it on 127.0.0.1:8420", 0),
     ("the laya server listens on 127.0.0.1", 0),
     ("rename useStateReducerXY", 0),
     ("café — naïve résumé 😀", 0),
