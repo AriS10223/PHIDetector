@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, tempfile
+import json, os, subprocess, sys, tempfile, urllib.request
 
 HOOK = ".claude/hooks/pii_check.py"
 STORE = tempfile.mkdtemp(prefix="phi-mask-test-")
@@ -29,6 +29,7 @@ CASES = [
     ("help me refactor this function", 0),
     ("bump version to 3.14.159", 0),
     ("run it on 127.0.0.1:8420", 0),
+    ("the laya server listens on 127.0.0.1", 0),
     ("rename useStateReducerXY", 0),
     ("café — naïve résumé 😀", 0),
     ("patient ssn 123-45-6789", 2),
@@ -42,6 +43,34 @@ CASES = [
 for i, (prompt, expected) in enumerate(CASES, 1):
     code, _, _ = run({"hook_event_name": "UserPromptSubmit", "prompt": prompt})
     check(f"case {i}: exit {expected} (got {code})", code == expected)
+
+# --- End-to-end through Laya: regex can't see any of these. Only run when server.py is up. ---
+LAYA_CASES = [
+    ("Sarah Chen has diabetes, write her a care plan", 2),
+    ("she was born March 3rd 1961", 2),
+    ("the patient lives at 42 Elm Street, Springfield", 2),
+    ("MRN 00482913", 2),
+    ("Mr. Okafor, age 92, was discharged yesterday", 2),
+    ("add a zip code field to the form", 0),
+    ("rename the patient table to encounters in the migration", 0),
+    ("write a unit test for the date parser", 0),
+]
+
+def laya_up():
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open("http://127.0.0.1:8420/health", timeout=3) as resp:
+            return json.loads(resp.read()).get("status") == "ok"
+    except Exception:
+        return False
+
+if laya_up():
+    print("Laya server up: running Laya cases")
+    for i, (prompt, expected) in enumerate(LAYA_CASES, 1):
+        code, _, _ = run({"hook_event_name": "UserPromptSubmit", "prompt": prompt})
+        check(f"laya case {i}: exit {expected} (got {code})", code == expected)
+else:
+    print(f"Laya server down: SKIP {len(LAYA_CASES)} Laya cases (regex only, proves fail-open)")
 
 # --- masking round trip ---
 if os.path.exists(MAP_PATH):
