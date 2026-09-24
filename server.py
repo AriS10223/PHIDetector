@@ -48,17 +48,29 @@ QUESTIONS = {
     },
     "geographic": {
         "type": "noul",
-        "instructions": "Does `prompt` contain an actual street address, city or ZIP code value where a person lives (not just the words)?",
+        # "street address, city or ZIP code value" scored 127.0.0.1 and any 5-digit number as an
+        # address (0.76-0.93). This wording keeps real addresses at >=0.80 and IPs/ticket numbers <=0.56.
+        "instructions": "Does `prompt` contain a postal mailing address or home town for a specific person?",
     },
     "date": {
         "type": "noul",
         "instructions": "Does `prompt` state a specific person's birth, admission, discharge or death date, or an age over 89?",
     },
+    # id_number uses TWO heads that must both agree (min of the two). Alone, the first scores
+    # "the ticket number is 48213" at 0.83 and the second scores a sentence about HIPAA at 0.84;
+    # the min of the pair stays <=0.60 on every negative while real record/plan/license/serial
+    # numbers score >=0.93 on both.
     "id_number": {
         "type": "noul",
         "instructions": "Does `prompt` contain an actual medical record, insurance, license or device serial number value?",
     },
+    "id_number_health": {
+        "type": "noul",
+        "instructions": "Does `prompt` contain a healthcare identifier for a person, like a medical record number, insurance member ID, or implanted device serial?",
+    },
 }
+# Questions whose answers are combined into one category by taking the minimum.
+PAIRED = {"id_number": ("id_number", "id_number_health")}
 
 # Block when any category question answers "yes" with at least this probability.
 # Tuned with test_server.py: every NEGATIVE must come back blocked=false. Measured margin:
@@ -95,13 +107,18 @@ def score(text: str) -> dict:
     with _predict_lock:
         results = agent.predict_batch(states, QUESTIONS)
 
-    # Highest "yes" probability across every (chunk, category) pair.
+    # Highest "yes" probability across every (chunk, category) pair. Paired heads are
+    # folded into one category first by taking the min, so both must agree.
     best_prob = 0.0
     best_category = "none"
-    per_category = {q: 0.0 for q in QUESTIONS}
+    categories = [q for q in QUESTIONS if not any(q in pair[1:] for pair in PAIRED.values())]
+    per_category = {q: 0.0 for q in categories}
     for r in results:
-        for q, ans in r["answers"].items():
-            p = ans["noul"]
+        ans = {q: a["noul"] for q, a in r["answers"].items()}
+        for cat, heads in PAIRED.items():
+            ans[cat] = min(ans[h] for h in heads)
+        for q in categories:
+            p = ans[q]
             per_category[q] = max(per_category[q], p)
             if p > best_prob:
                 best_prob, best_category = p, q

@@ -11,8 +11,8 @@ MAP_PATH = os.path.join(STORE, "phi-mask", SESSION + ".json")
 def tok(label, n):
     return "[[" + "PHI_" + label + "_" + str(n) + "]]"
 
-def run(payload):
-    payload = {"session_id": SESSION, **payload}
+def run(payload, session=SESSION):
+    payload = {"session_id": session, **payload}
     r = subprocess.run([sys.executable, HOOK], input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                        capture_output=True, timeout=15, env=ENV)
     out = json.loads(r.stdout) if r.stdout.strip() else None
@@ -28,6 +28,7 @@ def check(name, ok):
 CASES = [
     ("help me refactor this function", 0),
     ("bump version to 3.14.159", 0),
+    ("run it on 127.0.0.1:8420", 0),
     ("the laya server listens on 127.0.0.1", 0),
     ("rename useStateReducerXY", 0),
     ("café — naïve résumé 😀", 0),
@@ -38,21 +39,43 @@ CASES = [
     ("call me at 555.123.4567", 2),
     ("email me at pat@example.com", 2),
     ("see https://example.com/patient/42", 2),
+    ("his birthday is 1/1/1980", 2),
+    ("admitted 2024-03-03", 2),
+    ("she was born March 3rd 1961", 2),
+    ("release is scheduled for 10/1", 0),
 ]
+# Redaction contract: for every regex-blocked row, the block message must show the masked prompt
+# and must NOT echo the identifier itself back to the terminal. (Laya rows have no span to mask.)
+REDACT_ROWS = {
+    "patient ssn 123-45-6789": "123-45-6789",
+    "vehicle VIN is 1HGCM82633A004352": "1HGCM82633A004352",
+    "the server is at 192.168.1.10": "192.168.1.10",
+    "call me at (555) 123-4567": "123-4567",
+    "call me at 555.123.4567": "555.123.4567",
+    "email me at pat@example.com": "pat@example.com",
+    "see https://example.com/patient/42": "example.com",
+    "his birthday is 1/1/1980": "1/1/1980",
+    "admitted 2024-03-03": "2024-03-03",
+    "she was born March 3rd 1961": "March 3rd 1961",
+}
+
 for i, (prompt, expected) in enumerate(CASES, 1):
-    code, _, _ = run({"hook_event_name": "UserPromptSubmit", "prompt": prompt})
-    check(f"case {i}: exit {expected} (got {code})", code == expected)
+    code, _, err = run({"hook_event_name": "UserPromptSubmit", "prompt": prompt})
+    ok = code == expected
+    if prompt in REDACT_ROWS:
+        ok = ok and "[[" + "PHI_" in err and REDACT_ROWS[prompt] not in err
+    check(f"case {i}: exit {expected} (got {code})", ok)
 
 # --- End-to-end through Laya: regex can't see any of these. Only run when server.py is up. ---
 LAYA_CASES = [
+    ("send this to Sarah Chen", 2),
     ("Sarah Chen has diabetes, write her a care plan", 2),
-    ("she was born March 3rd 1961", 2),
-    ("the patient lives at 42 Elm Street, Springfield", 2),
-    ("MRN 00482913", 2),
     ("Mr. Okafor, age 92, was discharged yesterday", 2),
+    ("lives at 42 Elm Street, Springfield", 2),
+    ("MRN 00482913", 2),
     ("add a zip code field to the form", 0),
-    ("rename the patient table to encounters in the migration", 0),
     ("write a unit test for the date parser", 0),
+    ("rename the patient table to encounters in the migration", 0),
 ]
 
 def laya_up():
@@ -119,6 +142,21 @@ check("PostToolUse silent when clean", code == 0 and out is None)
 # --- MessageDisplay: tokens -> real values on screen ---
 code, out, _ = run({"hook_event_name": "MessageDisplay", "delta": f"Wrote {tok('EMAIL', 1)} to notes.txt\n", "index": 0, "final": True})
 check("MessageDisplay unmasks", (out or {}).get("hookSpecificOutput", {}).get("displayContent") == "Wrote pat@example.com to notes.txt\n")
+
+# --- span unit cases (from the *** redaction version): each *** there is one token here ---
+import re
+UNIT = [
+    ("Email pat@example.com about SSN 123-45-6789", "Email *** about SSN ***", {"email": 1, "ssn": 1}),
+    ("see https://ex.com/u/pat@example.com now", "see *** now", {"url": 1}),   # email inside URL: one mask
+    ("bump version to 3.14.159", "bump version to 3.14.159", {}),
+    ("card 4111 1111 1111 1111 on file", "card *** on file", {"account_or_card_number": 1}),
+    ("born 01-01-80, seen Jan 5, 2020 and 3 March 1961", "born ***, seen *** and ***", {"date": 3}),
+    ("deadline 10/1, version 3.14.159, host 127.0.0.1:8420", "deadline 10/1, version 3.14.159, host 127.0.0.1:8420", {}),
+]
+for i, (text, want, _) in enumerate(UNIT, 1):
+    code, _, err = run({"hook_event_name": "UserPromptSubmit", "prompt": text}, session=f"unit-{i}")
+    got = re.sub(r"\[\[PHI_[A-Z]+_\d+\]\]", "***", err.strip().splitlines()[-1]) if "Blocked: HIPAA" in err else text  # regex masking only; a Laya-only block leaves no spans
+    check(f"unit {i}: masks to the expected spans", got == want)
 
 # --- SessionEnd: map deleted ---
 run({"hook_event_name": "SessionEnd", "reason": "other"})

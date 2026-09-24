@@ -1,4 +1,4 @@
-import sys, json, re, os, subprocess, urllib.request
+import sys, json, re, os, shutil, subprocess, urllib.request
 
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # Windows default is cp1252; block messages echo the prompt
 
@@ -26,6 +26,13 @@ PATTERNS = {
     "CARD": r"\b(?:\d[ -]*?){13,16}\b",
     "IP": r"\b(?!127\.)(?:\d{1,3}\.){3}\d{1,3}\b",
     "PHONE": r"(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b",
+    # Dates need a year so "10/1" deadlines and "3.14.159" versions are untouched. Any date is masked:
+    # regex can't tell a birthday from a release date, and HIPAA counts every date tied to a person.
+    "DATE": (
+        r"\b(?:\d{1,2}[/-]\d{1,2}[/-](?:\d{4}|\d{2})|\d{4}-\d{2}-\d{2})\b"
+        r"|(?i:\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b)"
+        r"|(?i:\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s+\d{4}\b)"
+    ),
 }
 TOKEN_RE = re.compile(r"\[\[PHI_([A-Z]+)_(\d+)\]\]")
 
@@ -118,13 +125,40 @@ def walk(obj, fn):
     return obj
 
 def copy_to_clipboard(text):
+    """Best effort. Returns True if the masked prompt landed on the clipboard."""
     if os.environ.get("PHI_MASK_NO_CLIPBOARD"):
         return False
+    if os.name == "nt":
+        args, payload = ["clip.exe"], text.encode("utf-16-le")
+    else:
+        cmd = shutil.which("pbcopy") or shutil.which("xclip") or shutil.which("wl-copy")
+        if not cmd:
+            return False
+        args = [cmd, "-selection", "clipboard"] if cmd.endswith("xclip") else [cmd]
+        payload = text.encode("utf-8")
     try:
-        subprocess.run(["clip.exe"], input=text.encode("utf-16-le"), timeout=5, check=True)
+        subprocess.run(args, input=payload, timeout=5, check=True)
         return True
     except Exception:
         return False
+
+def laya_check(text):
+    """Second layer for what regex can't see: names, addresses, MRN/plan/device numbers.
+    On-device only (127.0.0.1). Fails OPEN: a server hiccup must never block every prompt.
+    Tokens are stripped first: they hold no PHI, but Laya scores them as ID numbers (p~0.96)."""
+    timeout = 10  # measured worst case ~6-7s for a max-chunk prompt; hook timeout is 15s
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(
+            "http://127.0.0.1:8420/check",
+            data=json.dumps({"text": TOKEN_RE.sub("", text)}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with opener.open(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
 
 # --- event handlers ---
 
@@ -143,32 +177,24 @@ def on_prompt():
             masked = mask(prompt, m)
             save_map(m)
         copied = copy_to_clipboard(masked)
+        # Laya has no spans, so anything it still flags in the masked copy (a name, an address)
+        # would hard-block the resend. Say so now instead of bouncing the user twice.
+        r = laya_check(masked)
+        still = ""
+        if r and r.get("blocked"):
+            still = (f"Laya would still flag a possible '{r['category']}' (p={r['phi_prob']:.2f}) "
+                     "in the masked copy. Edit that part before resending.\n")
         block(
             "Blocked: HIPAA Safe Harbor identifier(s) detected. Claude did not see this prompt.\n"
+            + still
             + ("Masked version copied to clipboard. Paste and send it:\n\n" if copied else "Send this masked version instead:\n\n")
             + masked
         )
 
-    # Local Laya server (server.py) for categories regex can't catch: names, addresses, dates, free-form IDs.
-    # Measured on the demo machine: ~0.5s for a short prompt, ~6.6s worst case (4 chunks, LAYA_THREADS=24).
-    # Must stay under the 15s hook timeout in settings.json.
-    LAYA_TIMEOUT = 10
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        req = urllib.request.Request(
-            "http://127.0.0.1:8420/check",
-            # Strip tokens first: they hold no PHI, but Laya scores them as ID numbers (p~0.96),
-            # which would re-block every pasted masked prompt.
-            data=json.dumps({"text": TOKEN_RE.sub("", prompt)}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with opener.open(req, timeout=LAYA_TIMEOUT) as resp:
-            r = json.loads(resp.read())
-        if r.get("blocked"):
-            block(f"Blocked: Laya flagged a possible '{r['category']}' Safe Harbor identifier (p={r['phi_prob']:.2f}).")
-    except Exception:
-        pass  # fail OPEN — a Laya/server hiccup must never block every prompt
+    r = laya_check(prompt)
+    if r and r.get("blocked"):
+        block(f"Blocked: Laya flagged a possible '{r['category']}' Safe Harbor identifier "
+              f"(p={r['phi_prob']:.2f}). Laya gives no span, so this cannot be auto-masked.")
 
     if TOKEN_RE.search(prompt):
         emit("UserPromptSubmit", additionalContext=(
